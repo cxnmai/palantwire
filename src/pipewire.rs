@@ -2,6 +2,8 @@ use std::{
     ffi::OsString,
     path::PathBuf,
     process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -92,15 +94,25 @@ pub fn list_audio_streams() -> Result<Vec<AudioStream>> {
     Ok(streams)
 }
 
-pub fn find_audio_stream(app: &str) -> Result<AudioStream> {
-    let matches = list_audio_streams()?
-        .into_iter()
-        .filter(|stream| stream.matches(app))
-        .collect::<Vec<_>>();
+pub fn wait_for_audio_stream(match_terms: &[String], timeout_seconds: u64) -> Result<AudioStream> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+
+    loop {
+        match find_audio_stream_by_terms(match_terms) {
+            Ok(stream) => return Ok(stream),
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => thread::sleep(Duration::from_millis(250)),
+        }
+    }
+}
+
+fn find_audio_stream_by_terms(match_terms: &[String]) -> Result<AudioStream> {
+    let matches = matching_audio_streams(match_terms)?;
 
     match matches.as_slice() {
         [] => Err(anyhow!(
-            "no active PipeWire playback stream matched '{app}'. Run `palantwire list-apps` while the app is playing audio."
+            "no active PipeWire playback stream matched {}. Start playback in the selected app and try again.",
+            format_match_terms(match_terms)
         )),
         [stream] => Ok(stream.clone()),
         streams => {
@@ -110,10 +122,18 @@ pub fn find_audio_stream(app: &str) -> Result<AudioStream> {
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(anyhow!(
-                "multiple streams matched '{app}': {choices}. Use a more specific app name."
+                "multiple streams matched {}: {choices}. Use a more specific app name.",
+                format_match_terms(match_terms)
             ))
         }
     }
+}
+
+fn matching_audio_streams(match_terms: &[String]) -> Result<Vec<AudioStream>> {
+    Ok(list_audio_streams()?
+        .into_iter()
+        .filter(|stream| match_terms.iter().any(|term| stream.matches(term)))
+        .collect())
 }
 
 pub fn capture_stream(options: CaptureOptions) -> Result<()> {
@@ -171,4 +191,12 @@ fn audio_stream_from_object(object: PwObject) -> Option<AudioStream> {
 
 fn prop<'a>(props: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
     props.get(key)?.as_str()
+}
+
+fn format_match_terms(match_terms: &[String]) -> String {
+    match_terms
+        .iter()
+        .map(|term| format!("'{term}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
