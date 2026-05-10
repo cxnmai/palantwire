@@ -4,7 +4,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod apps;
+mod audio;
+mod live;
 mod pipewire;
+mod session;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Wayland-native audio transcription utility")]
@@ -25,7 +28,7 @@ enum CommandKind {
         #[arg(short, long)]
         app: String,
 
-        /// Audio file to write. Extension controls pw-cat container when supported.
+        /// WAV file to write for the full recording.
         #[arg(short, long)]
         output: PathBuf,
 
@@ -44,6 +47,10 @@ enum CommandKind {
         /// Seconds to wait for the selected app to create a PipeWire playback stream.
         #[arg(long, default_value_t = 30)]
         wait: u64,
+
+        /// Enable live Vosk preview with the given local Vosk model directory.
+        #[arg(long)]
+        vosk_model: Option<PathBuf>,
     },
 }
 
@@ -80,8 +87,9 @@ fn main() -> Result<()> {
 
             for stream in streams {
                 println!(
-                    "{:>5}  {:<24}  pid:{:<8}  {}",
+                    "{:>5}  serial:{:<6}  {:<24}  pid:{:<8}  {}",
                     stream.id,
+                    stream.serial,
                     stream.display_name(),
                     stream
                         .process_id
@@ -98,22 +106,25 @@ fn main() -> Result<()> {
             rate,
             channels,
             wait,
+            vosk_model,
         } => {
             let window = apps::find_open_window(&app)?;
             let stream = pipewire::wait_for_audio_stream(&window.pipewire_selector(), wait)?;
             eprintln!(
-                "Capturing '{}' from PipeWire node {} into {}",
+                "Capturing '{}' from PipeWire node {} serial {} into {}",
                 stream.display_name(),
                 stream.id,
+                stream.serial,
                 output.display()
             );
 
-            pipewire::capture_stream(pipewire::CaptureOptions {
-                target_id: stream.id,
+            session::run_capture_session(session::CaptureSession {
+                stream,
                 output,
                 seconds,
                 rate,
                 channels,
+                vosk_model,
             })?;
         }
     }

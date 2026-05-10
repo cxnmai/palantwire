@@ -1,8 +1,7 @@
 use std::{
     collections::HashMap,
     ffi::OsString,
-    path::PathBuf,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -14,6 +13,7 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub struct AudioStream {
     pub id: u32,
+    pub serial: u32,
     pub app_name: Option<String>,
     pub process_id: Option<u32>,
     pub process_binary: Option<String>,
@@ -51,9 +51,8 @@ pub struct StreamSelector {
 }
 
 #[derive(Debug)]
-pub struct CaptureOptions {
+pub struct RawCaptureOptions {
     pub target_id: u32,
-    pub output: PathBuf,
     pub seconds: Option<u64>,
     pub rate: u32,
     pub channels: u8,
@@ -179,7 +178,7 @@ fn single_stream_match(
     }
 }
 
-pub fn capture_stream(options: CaptureOptions) -> Result<()> {
+pub fn spawn_raw_capture(options: RawCaptureOptions) -> Result<Child> {
     let mut args = vec![
         OsString::from("--record"),
         OsString::from("--target"),
@@ -188,6 +187,9 @@ pub fn capture_stream(options: CaptureOptions) -> Result<()> {
         OsString::from(options.rate.to_string()),
         OsString::from("--channels"),
         OsString::from(options.channels.to_string()),
+        OsString::from("--format"),
+        OsString::from("s16"),
+        OsString::from("--raw"),
     ];
 
     if let Some(seconds) = options.seconds {
@@ -196,19 +198,14 @@ pub fn capture_stream(options: CaptureOptions) -> Result<()> {
         args.push(OsString::from(samples.to_string()));
     }
 
-    args.push(options.output.into_os_string());
+    args.push(OsString::from("-"));
 
-    let status = Command::new("pw-cat")
+    Command::new("pw-cat")
         .args(args)
         .stdin(Stdio::null())
-        .status()
-        .context("failed to run pw-cat; install PipeWire utilities")?;
-
-    if !status.success() {
-        bail!("pw-cat exited with status {status}");
-    }
-
-    Ok(())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to run pw-cat; install PipeWire utilities")
 }
 
 fn audio_stream_from_object(
@@ -226,6 +223,7 @@ fn audio_stream_from_object(
 
     Some(AudioStream {
         id: object.id,
+        serial: prop_u32(&props, "object.serial").unwrap_or(object.id),
         app_name: prop(&props, "application.name").map(str::to_owned),
         process_id: process_id(&props, client_process_ids),
         process_binary: prop(&props, "application.process.binary").map(str::to_owned),
