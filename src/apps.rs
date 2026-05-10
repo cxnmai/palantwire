@@ -7,6 +7,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
+use crate::pipewire::StreamSelector;
+
 #[derive(Debug, Clone)]
 pub struct OpenWindow {
     pub id: u64,
@@ -25,7 +27,7 @@ impl OpenWindow {
         }
     }
 
-    pub fn pipewire_match_terms(&self) -> Vec<String> {
+    pub fn pipewire_selector(&self) -> StreamSelector {
         let mut terms = vec![self.app_id.clone(), self.title.clone()];
 
         if let Some(process_name) = &self.process_name {
@@ -35,7 +37,11 @@ impl OpenWindow {
         terms.retain(|term| !term.is_empty());
         terms.sort();
         terms.dedup();
-        terms
+
+        StreamSelector {
+            process_id: self.pid,
+            match_terms: terms,
+        }
     }
 
     fn matches(&self, needle: &str) -> bool {

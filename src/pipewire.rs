@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::OsString,
     path::PathBuf,
     process::{Command, Stdio},
@@ -14,6 +15,7 @@ use serde_json::Value;
 pub struct AudioStream {
     pub id: u32,
     pub app_name: Option<String>,
+    pub process_id: Option<u32>,
     pub process_binary: Option<String>,
     pub node_name: Option<String>,
     pub description: Option<String>,
@@ -40,6 +42,12 @@ impl AudioStream {
         .flatten()
         .any(|value| value.to_lowercase().contains(&needle))
     }
+}
+
+#[derive(Debug)]
+pub struct StreamSelector {
+    pub process_id: Option<u32>,
+    pub match_terms: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -84,21 +92,25 @@ pub fn list_audio_streams() -> Result<Vec<AudioStream>> {
 
     let objects: Vec<PwObject> =
         serde_json::from_slice(&output.stdout).context("failed to parse pw-dump JSON")?;
+    let client_process_ids = client_process_ids(&objects);
 
     let mut streams = objects
         .into_iter()
-        .filter_map(audio_stream_from_object)
+        .filter_map(|object| audio_stream_from_object(object, &client_process_ids))
         .collect::<Vec<_>>();
 
     streams.sort_by_key(|stream| (stream.display_name().to_lowercase(), stream.id));
     Ok(streams)
 }
 
-pub fn wait_for_audio_stream(match_terms: &[String], timeout_seconds: u64) -> Result<AudioStream> {
+pub fn wait_for_audio_stream(
+    selector: &StreamSelector,
+    timeout_seconds: u64,
+) -> Result<AudioStream> {
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
 
     loop {
-        match find_audio_stream_by_terms(match_terms) {
+        match find_audio_stream(selector) {
             Ok(stream) => return Ok(stream),
             Err(error) if Instant::now() >= deadline => return Err(error),
             Err(_) => thread::sleep(Duration::from_millis(250)),
@@ -106,13 +118,30 @@ pub fn wait_for_audio_stream(match_terms: &[String], timeout_seconds: u64) -> Re
     }
 }
 
-fn find_audio_stream_by_terms(match_terms: &[String]) -> Result<AudioStream> {
-    let matches = matching_audio_streams(match_terms)?;
+fn find_audio_stream(selector: &StreamSelector) -> Result<AudioStream> {
+    let streams = list_audio_streams()?;
+
+    if let Some(process_id) = selector.process_id {
+        let pid_matches = streams
+            .iter()
+            .filter(|stream| stream.process_id == Some(process_id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if let Some(stream) = single_stream_match(&pid_matches, "PID", &process_id.to_string())? {
+            return Ok(stream);
+        }
+    }
+
+    let matches = streams
+        .into_iter()
+        .filter(|stream| selector.match_terms.iter().any(|term| stream.matches(term)))
+        .collect::<Vec<_>>();
 
     match matches.as_slice() {
         [] => Err(anyhow!(
             "no active PipeWire playback stream matched {}. Start playback in the selected app and try again.",
-            format_match_terms(match_terms)
+            format_selector(selector)
         )),
         [stream] => Ok(stream.clone()),
         streams => {
@@ -123,17 +152,31 @@ fn find_audio_stream_by_terms(match_terms: &[String]) -> Result<AudioStream> {
                 .join(", ");
             Err(anyhow!(
                 "multiple streams matched {}: {choices}. Use a more specific app name.",
-                format_match_terms(match_terms)
+                format_selector(selector)
             ))
         }
     }
 }
 
-fn matching_audio_streams(match_terms: &[String]) -> Result<Vec<AudioStream>> {
-    Ok(list_audio_streams()?
-        .into_iter()
-        .filter(|stream| match_terms.iter().any(|term| stream.matches(term)))
-        .collect())
+fn single_stream_match(
+    streams: &[AudioStream],
+    kind: &str,
+    value: &str,
+) -> Result<Option<AudioStream>> {
+    match streams {
+        [] => Ok(None),
+        [stream] => Ok(Some(stream.clone())),
+        streams => {
+            let choices = streams
+                .iter()
+                .map(|stream| format!("{} ({})", stream.display_name(), stream.id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow!(
+                "multiple streams matched {kind} {value}: {choices}. Pick a more specific stream."
+            ))
+        }
+    }
 }
 
 pub fn capture_stream(options: CaptureOptions) -> Result<()> {
@@ -168,7 +211,10 @@ pub fn capture_stream(options: CaptureOptions) -> Result<()> {
     Ok(())
 }
 
-fn audio_stream_from_object(object: PwObject) -> Option<AudioStream> {
+fn audio_stream_from_object(
+    object: PwObject,
+    client_process_ids: &HashMap<u32, u32>,
+) -> Option<AudioStream> {
     if !object.object_type.ends_with(":Node") {
         return None;
     }
@@ -181,6 +227,7 @@ fn audio_stream_from_object(object: PwObject) -> Option<AudioStream> {
     Some(AudioStream {
         id: object.id,
         app_name: prop(&props, "application.name").map(str::to_owned),
+        process_id: process_id(&props, client_process_ids),
         process_binary: prop(&props, "application.process.binary").map(str::to_owned),
         node_name: prop(&props, "node.name").map(str::to_owned),
         description: prop(&props, "node.description")
@@ -193,10 +240,45 @@ fn prop<'a>(props: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a 
     props.get(key)?.as_str()
 }
 
-fn format_match_terms(match_terms: &[String]) -> String {
-    match_terms
+fn prop_u32(props: &serde_json::Map<String, Value>, key: &str) -> Option<u32> {
+    props
+        .get(key)
+        .and_then(|value| value.as_u64().and_then(|value| u32::try_from(value).ok()))
+        .or_else(|| prop(props, key).and_then(|value| value.parse().ok()))
+}
+
+fn process_id(
+    props: &serde_json::Map<String, Value>,
+    client_process_ids: &HashMap<u32, u32>,
+) -> Option<u32> {
+    prop_u32(props, "application.process.id").or_else(|| {
+        prop_u32(props, "client.id")
+            .and_then(|client_id| client_process_ids.get(&client_id).copied())
+    })
+}
+
+fn client_process_ids(objects: &[PwObject]) -> HashMap<u32, u32> {
+    objects
+        .iter()
+        .filter(|object| object.object_type.ends_with(":Client"))
+        .filter_map(|object| {
+            let props = &object.info.as_ref()?.props.as_ref()?.values;
+            let process_id = prop_u32(props, "application.process.id")?;
+            Some((object.id, process_id))
+        })
+        .collect()
+}
+
+fn format_selector(selector: &StreamSelector) -> String {
+    let mut parts = selector
+        .match_terms
         .iter()
         .map(|term| format!("'{term}'"))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect::<Vec<_>>();
+
+    if let Some(process_id) = selector.process_id {
+        parts.insert(0, format!("PID {process_id}"));
+    }
+
+    parts.join(", ")
 }

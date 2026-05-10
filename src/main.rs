@@ -80,9 +80,13 @@ fn main() -> Result<()> {
 
             for stream in streams {
                 println!(
-                    "{:>5}  {:<24}  {}",
+                    "{:>5}  {:<24}  pid:{:<8}  {}",
                     stream.id,
                     stream.display_name(),
+                    stream
+                        .process_id
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "-".to_owned()),
                     stream.description.as_deref().unwrap_or("-")
                 );
             }
@@ -96,7 +100,7 @@ fn main() -> Result<()> {
             wait,
         } => {
             let window = apps::find_open_window(&app)?;
-            let stream = pipewire::wait_for_audio_stream(&window.pipewire_match_terms(), wait)?;
+            let stream = pipewire::wait_for_audio_stream(&window.pipewire_selector(), wait)?;
             eprintln!(
                 "Capturing '{}' from PipeWire node {} into {}",
                 stream.display_name(),
