@@ -20,13 +20,18 @@ pub struct CaptureSession {
     pub channels: u8,
     pub whisper_model: Option<PathBuf>,
     pub whisper_chunk_seconds: u32,
+    pub verbose: bool,
+    pub progress: bool,
+    pub label_transcript: bool,
 }
 
 pub fn run_capture_session(session: CaptureSession) -> Result<()> {
-    eprintln!(
-        "Starting raw PipeWire capture from node {} at {} Hz, {} channel(s)",
-        session.stream.id, session.rate, session.channels
-    );
+    if session.verbose {
+        eprintln!(
+            "Starting raw PipeWire capture from node {} at {} Hz, {} channel(s)",
+            session.stream.id, session.rate, session.channels
+        );
+    }
 
     let mut capture = pipewire::spawn_raw_capture(pipewire::RawCaptureOptions {
         target_id: session.stream.serial,
@@ -43,20 +48,30 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
     let mut recorder =
         WavWriter::create(&session.output, session.rate, u16::from(session.channels))?;
 
-    eprintln!("Writing full WAV recording to {}", session.output.display());
+    if session.verbose {
+        eprintln!("Writing full WAV recording to {}", session.output.display());
+    }
 
     let mut whisper_preview = session
         .whisper_model
         .as_deref()
-        .map(|model| WhisperPreview::spawn(model, session.rate, session.whisper_chunk_seconds))
+        .map(|model| {
+            WhisperPreview::spawn(
+                model,
+                session.rate,
+                session.whisper_chunk_seconds,
+                session.verbose,
+                session.label_transcript,
+            )
+        })
         .transpose()?;
 
-    if whisper_preview.is_some() {
+    if session.verbose && whisper_preview.is_some() {
         eprintln!(
             "Live whisper.cpp preview enabled with {}s chunks",
             session.whisper_chunk_seconds
         );
-    } else {
+    } else if session.verbose {
         eprintln!("Live preview disabled; pass --whisper-model to enable it");
     }
 
@@ -80,7 +95,7 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
             whisper_preview.write_pcm(chunk)?;
         }
 
-        if last_progress.elapsed() >= Duration::from_secs(2) {
+        if session.progress && last_progress.elapsed() >= Duration::from_secs(2) {
             let bytes_per_second = u64::from(session.rate) * u64::from(session.channels) * 2;
             let captured_seconds = total_bytes / bytes_per_second;
             eprintln!("Captured {captured_seconds}s of audio");
@@ -91,12 +106,14 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
     let status = capture.wait().context("failed to wait for pw-cat")?;
     if !status.success() && total_bytes == 0 {
         bail!("pw-cat exited with status {status}");
-    } else if !status.success() {
+    } else if session.verbose && !status.success() {
         eprintln!("pw-cat exited with status {status} after audio capture completed");
     }
 
     recorder.finalize(session.rate, u16::from(session.channels))?;
-    eprintln!("Saved {}", session.output.display());
+    if session.verbose {
+        eprintln!("Saved {}", session.output.display());
+    }
 
     if let Some(whisper_preview) = whisper_preview {
         whisper_preview.finish()?;

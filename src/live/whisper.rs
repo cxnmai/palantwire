@@ -12,12 +12,19 @@ pub struct WhisperPreview {
 }
 
 impl WhisperPreview {
-    pub fn spawn(model: &Path, sample_rate: u32, chunk_seconds: u32) -> Result<Self> {
+    pub fn spawn(
+        model: &Path,
+        sample_rate: u32,
+        chunk_seconds: u32,
+        verbose: bool,
+        label_transcript: bool,
+    ) -> Result<Self> {
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/whisper_live.py");
         let whisper_cli = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tools/whisper.cpp/build/bin/whisper-cli");
 
-        let mut child = Command::new("python3")
+        let mut command = Command::new("python3");
+        command
             .arg(script)
             .arg("--model")
             .arg(model)
@@ -26,10 +33,22 @@ impl WhisperPreview {
             .arg("--rate")
             .arg(sample_rate.to_string())
             .arg("--chunk-seconds")
-            .arg(chunk_seconds.to_string())
+            .arg(chunk_seconds.to_string());
+
+        if label_transcript {
+            command.arg("--label");
+        }
+
+        let stderr = if verbose {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        };
+
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stderr(stderr)
             .spawn()
             .context("failed to start Whisper live preview worker")?;
 

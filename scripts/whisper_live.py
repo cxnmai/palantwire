@@ -48,12 +48,31 @@ def transcribe_chunk(whisper_cli: Path, model: Path, wav_path: Path) -> str:
     return clean_output(proc.stdout)
 
 
+def emit_transcript(text: str, label: bool, previous_ended_sentence: bool) -> bool:
+    if label:
+        print(f"whisper: {text}", flush=True)
+        return True
+
+    text = re.sub(r"(?<=[.])\s+", "\n", text)
+
+    if previous_ended_sentence:
+        separator = "" if text.startswith("\n") else "\n"
+    else:
+        separator = " "
+
+    if previous_ended_sentence is not None:
+        print(separator, end="", flush=False)
+    print(text, end="", flush=True)
+    return text.rstrip().endswith(".")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Chunk raw s16le PCM into whisper.cpp.")
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--whisper-cli", required=True, type=Path)
     parser.add_argument("--rate", required=True, type=int)
     parser.add_argument("--chunk-seconds", type=int, default=5)
+    parser.add_argument("--label", action="store_true")
     args = parser.parse_args()
 
     if not args.whisper_cli.exists():
@@ -66,6 +85,7 @@ def main() -> int:
     chunk_bytes = args.rate * 2 * args.chunk_seconds
     pending = bytearray()
     index = 0
+    previous_ended_sentence = None
 
     with tempfile.TemporaryDirectory(prefix="palantwire-whisper-") as temp_dir:
         temp_dir = Path(temp_dir)
@@ -84,7 +104,9 @@ def main() -> int:
                 write_wav(wav_path, pcm, args.rate)
                 text = transcribe_chunk(args.whisper_cli, args.model, wav_path)
                 if text:
-                    print(f"whisper: {text}", flush=True)
+                    previous_ended_sentence = emit_transcript(
+                        text, args.label, previous_ended_sentence
+                    )
                 index += 1
 
         if pending:
@@ -92,7 +114,12 @@ def main() -> int:
             write_wav(wav_path, bytes(pending), args.rate)
             text = transcribe_chunk(args.whisper_cli, args.model, wav_path)
             if text:
-                print(f"whisper: {text}", flush=True)
+                previous_ended_sentence = emit_transcript(
+                    text, args.label, previous_ended_sentence
+                )
+
+    if previous_ended_sentence is not None and not args.label:
+        print(flush=True)
 
     return 0
 

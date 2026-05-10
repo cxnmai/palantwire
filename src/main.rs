@@ -55,6 +55,18 @@ enum CommandKind {
         /// Seconds per whisper.cpp preview chunk.
         #[arg(long, default_value_t = 5)]
         whisper_chunk_seconds: u32,
+
+        /// Print capture setup and completion diagnostics to stderr.
+        #[arg(long)]
+        verbose: bool,
+
+        /// Print periodic capture progress to stderr.
+        #[arg(long)]
+        progress: bool,
+
+        /// Prefix transcript chunks with "whisper:".
+        #[arg(long)]
+        label_transcript: bool,
     },
 }
 
@@ -112,16 +124,21 @@ fn main() -> Result<()> {
             wait,
             whisper_model,
             whisper_chunk_seconds,
+            verbose,
+            progress,
+            label_transcript,
         } => {
             let window = apps::find_open_window(&app)?;
             let stream = pipewire::wait_for_audio_stream(&window.pipewire_selector(), wait)?;
-            eprintln!(
-                "Capturing '{}' from PipeWire node {} serial {} into {}",
-                stream.display_name(),
-                stream.id,
-                stream.serial,
-                output.display()
-            );
+            if verbose {
+                eprintln!(
+                    "Capturing '{}' from PipeWire node {} serial {} into {}",
+                    stream.display_name(),
+                    stream.id,
+                    stream.serial,
+                    output.display()
+                );
+            }
 
             session::run_capture_session(session::CaptureSession {
                 stream,
@@ -131,6 +148,9 @@ fn main() -> Result<()> {
                 channels,
                 whisper_model,
                 whisper_chunk_seconds,
+                verbose,
+                progress,
+                label_transcript,
             })?;
         }
     }
