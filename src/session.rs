@@ -8,7 +8,6 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     audio::recording::WavWriter,
-    live::vosk::VoskPreview,
     live::whisper::WhisperPreview,
     pipewire::{self, AudioStream},
 };
@@ -19,7 +18,6 @@ pub struct CaptureSession {
     pub seconds: Option<u64>,
     pub rate: u32,
     pub channels: u8,
-    pub vosk_model: Option<PathBuf>,
     pub whisper_model: Option<PathBuf>,
     pub whisper_chunk_seconds: u32,
 }
@@ -47,26 +45,19 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
 
     eprintln!("Writing full WAV recording to {}", session.output.display());
 
-    let mut preview = session
-        .vosk_model
-        .as_deref()
-        .map(|model| VoskPreview::spawn(model, session.rate))
-        .transpose()?;
     let mut whisper_preview = session
         .whisper_model
         .as_deref()
         .map(|model| WhisperPreview::spawn(model, session.rate, session.whisper_chunk_seconds))
         .transpose()?;
 
-    if preview.is_some() {
-        eprintln!("Live Vosk preview enabled");
-    } else if whisper_preview.is_some() {
+    if whisper_preview.is_some() {
         eprintln!(
             "Live whisper.cpp preview enabled with {}s chunks",
             session.whisper_chunk_seconds
         );
     } else {
-        eprintln!("Live preview disabled; pass --whisper-model or --vosk-model to enable it");
+        eprintln!("Live preview disabled; pass --whisper-model to enable it");
     }
 
     let mut buffer = vec![0u8; 4096];
@@ -84,10 +75,6 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
         let chunk = &buffer[..read];
         total_bytes += read as u64;
         recorder.write_pcm(chunk)?;
-
-        if let Some(preview) = &mut preview {
-            preview.write_pcm(chunk)?;
-        }
 
         if let Some(whisper_preview) = &mut whisper_preview {
             whisper_preview.write_pcm(chunk)?;
@@ -110,10 +97,6 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
 
     recorder.finalize(session.rate, u16::from(session.channels))?;
     eprintln!("Saved {}", session.output.display());
-
-    if let Some(preview) = preview {
-        preview.finish()?;
-    }
 
     if let Some(whisper_preview) = whisper_preview {
         whisper_preview.finish()?;

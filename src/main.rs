@@ -48,10 +48,6 @@ enum CommandKind {
         #[arg(long, default_value_t = 30)]
         wait: u64,
 
-        /// Enable live Vosk preview with the given local Vosk model directory.
-        #[arg(long)]
-        vosk_model: Option<PathBuf>,
-
         /// Enable experimental whisper.cpp chunked preview with the given ggml model.
         #[arg(long)]
         whisper_model: Option<PathBuf>,
@@ -114,7 +110,6 @@ fn main() -> Result<()> {
             rate,
             channels,
             wait,
-            vosk_model,
             whisper_model,
             whisper_chunk_seconds,
         } => {
@@ -134,7 +129,6 @@ fn main() -> Result<()> {
                 seconds,
                 rate,
                 channels,
-                vosk_model,
                 whisper_model,
                 whisper_chunk_seconds,
             })?;
