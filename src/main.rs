@@ -51,6 +51,14 @@ enum CommandKind {
         /// Enable live Vosk preview with the given local Vosk model directory.
         #[arg(long)]
         vosk_model: Option<PathBuf>,
+
+        /// Enable experimental whisper.cpp chunked preview with the given ggml model.
+        #[arg(long)]
+        whisper_model: Option<PathBuf>,
+
+        /// Seconds per whisper.cpp preview chunk.
+        #[arg(long, default_value_t = 5)]
+        whisper_chunk_seconds: u32,
     },
 }
 
@@ -107,6 +115,8 @@ fn main() -> Result<()> {
             channels,
             wait,
             vosk_model,
+            whisper_model,
+            whisper_chunk_seconds,
         } => {
             let window = apps::find_open_window(&app)?;
             let stream = pipewire::wait_for_audio_stream(&window.pipewire_selector(), wait)?;
@@ -125,6 +135,8 @@ fn main() -> Result<()> {
                 rate,
                 channels,
                 vosk_model,
+                whisper_model,
+                whisper_chunk_seconds,
             })?;
         }
     }

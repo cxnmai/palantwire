@@ -1,4 +1,5 @@
 /target
 /models
+/tools
 __pycache__/
 *.py[cod]

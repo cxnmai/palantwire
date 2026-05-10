@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use crate::{
     audio::recording::WavWriter,
     live::vosk::VoskPreview,
+    live::whisper::WhisperPreview,
     pipewire::{self, AudioStream},
 };
 
@@ -19,6 +20,8 @@ pub struct CaptureSession {
     pub rate: u32,
     pub channels: u8,
     pub vosk_model: Option<PathBuf>,
+    pub whisper_model: Option<PathBuf>,
+    pub whisper_chunk_seconds: u32,
 }
 
 pub fn run_capture_session(session: CaptureSession) -> Result<()> {
@@ -49,11 +52,21 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
         .as_deref()
         .map(|model| VoskPreview::spawn(model, session.rate))
         .transpose()?;
+    let mut whisper_preview = session
+        .whisper_model
+        .as_deref()
+        .map(|model| WhisperPreview::spawn(model, session.rate, session.whisper_chunk_seconds))
+        .transpose()?;
 
     if preview.is_some() {
         eprintln!("Live Vosk preview enabled");
+    } else if whisper_preview.is_some() {
+        eprintln!(
+            "Live whisper.cpp preview enabled with {}s chunks",
+            session.whisper_chunk_seconds
+        );
     } else {
-        eprintln!("Live Vosk preview disabled; pass --vosk-model to enable it");
+        eprintln!("Live preview disabled; pass --whisper-model or --vosk-model to enable it");
     }
 
     let mut buffer = vec![0u8; 4096];
@@ -76,6 +89,10 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
             preview.write_pcm(chunk)?;
         }
 
+        if let Some(whisper_preview) = &mut whisper_preview {
+            whisper_preview.write_pcm(chunk)?;
+        }
+
         if last_progress.elapsed() >= Duration::from_secs(2) {
             let bytes_per_second = u64::from(session.rate) * u64::from(session.channels) * 2;
             let captured_seconds = total_bytes / bytes_per_second;
@@ -96,6 +113,10 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
 
     if let Some(preview) = preview {
         preview.finish()?;
+    }
+
+    if let Some(whisper_preview) = whisper_preview {
+        whisper_preview.finish()?;
     }
 
     Ok(())
