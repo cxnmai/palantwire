@@ -1,34 +1,47 @@
-use std::{
-    fs,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-pub struct SummaryRequest<'a> {
-    pub transcript: &'a str,
-    pub instruction: Option<&'a str>,
-    pub model: Option<&'a str>,
-}
+use super::{LanguageModelProvider, SummaryRequest};
 
-pub fn authenticate() -> Result<()> {
-    let status = Command::new("codex")
-        .args(["login", "--device-auth"])
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to start `codex login --device-auth`; install Codex CLI first")?;
+pub struct CodexProvider;
 
-    if !status.success() {
-        bail!("Codex login failed with status {status}");
+impl LanguageModelProvider for CodexProvider {
+    fn authenticate(&self) -> Result<()> {
+        let status = Command::new("codex")
+            .args(["login", "--device-auth"])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("failed to start `codex login --device-auth`; install Codex CLI first")?;
+
+        if !status.success() {
+            bail!("Codex login failed with status {status}");
+        }
+
+        self.ensure_authenticated()
     }
 
-    ensure_chatgpt_login()
+    fn auth_status(&self) -> Result<String> {
+        auth_status()
+    }
+
+    fn ensure_authenticated(&self) -> Result<()> {
+        let status = auth_status()?;
+        if status.contains("Logged in using ChatGPT") {
+            return Ok(());
+        }
+
+        bail!("Codex is not logged in with ChatGPT. Run `palantwire ai auth` first.")
+    }
+
+    fn summarize(&self, request: SummaryRequest<'_>) -> Result<String> {
+        summarize(request)
+    }
 }
 
-pub fn auth_status() -> Result<String> {
+fn auth_status() -> Result<String> {
     let output = Command::new("codex")
         .args(["login", "status"])
         .output()
@@ -60,27 +73,7 @@ pub fn auth_status() -> Result<String> {
     }
 }
 
-pub fn ensure_chatgpt_login() -> Result<()> {
-    let status = auth_status()?;
-    if status.contains("Logged in using ChatGPT") {
-        return Ok(());
-    }
-
-    bail!("Codex is not logged in with ChatGPT. Run `palantwire ai auth` first.")
-}
-
-pub fn read_transcript(input: &Path) -> Result<String> {
-    let transcript = fs::read_to_string(input)
-        .with_context(|| format!("failed to read transcript {}", input.display()))?;
-
-    if transcript.trim().is_empty() {
-        bail!("transcript is empty");
-    }
-
-    Ok(transcript)
-}
-
-pub fn summarize(request: SummaryRequest<'_>) -> Result<String> {
+fn summarize(request: SummaryRequest<'_>) -> Result<String> {
     let prompt = summary_prompt(request.transcript, request.instruction);
     let mut command = Command::new("codex");
     command.args([
@@ -93,6 +86,9 @@ pub fn summarize(request: SummaryRequest<'_>) -> Result<String> {
 
     if let Some(model) = request.model {
         command.args(["--model", model]);
+    }
+    if let Some(reasoning) = request.reasoning {
+        command.args(["--config", &format!("model_reasoning_effort={reasoning:?}")]);
     }
 
     let output = command

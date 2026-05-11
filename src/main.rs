@@ -25,8 +25,8 @@ enum CommandKind {
     ListStreams,
     /// Authenticate and use Codex-powered AI features.
     Ai {
-        #[command(subcommand)]
-        command: ai::Command,
+        #[command(flatten)]
+        args: ai::Args,
     },
     /// Capture audio from a PipeWire stream owned by a matching app.
     Capture {
@@ -121,7 +121,7 @@ fn main() -> Result<()> {
                 );
             }
         }
-        CommandKind::Ai { command } => ai::run(command)?,
+        CommandKind::Ai { args } => ai::run(args)?,
         CommandKind::Capture {
             app,
             output,
