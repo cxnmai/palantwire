@@ -11,7 +11,29 @@ pub struct WhisperPreview {
     stdin: ChildStdin,
 }
 
+pub trait PcmSink {
+    fn write_pcm(&mut self, pcm: &[u8]) -> Result<()>;
+}
+
 impl WhisperPreview {
+    pub fn validate_dependencies(model: &Path) -> Result<()> {
+        let script = whisper_script();
+        if !script.exists() {
+            bail!("missing Whisper live preview worker: {}", script.display());
+        }
+
+        let whisper_cli = whisper_cli();
+        if !whisper_cli.exists() {
+            bail!("missing whisper-cli: {}", whisper_cli.display());
+        }
+
+        if !model.exists() {
+            bail!("missing Whisper model: {}", model.display());
+        }
+
+        Ok(())
+    }
+
     pub fn spawn(
         model: &Path,
         sample_rate: u32,
@@ -19,9 +41,9 @@ impl WhisperPreview {
         verbose: bool,
         label_transcript: bool,
     ) -> Result<Self> {
-        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/whisper_live.py");
-        let whisper_cli = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tools/whisper.cpp/build/bin/whisper-cli");
+        Self::validate_dependencies(model)?;
+        let script = whisper_script();
+        let whisper_cli = whisper_cli();
 
         let mut command = Command::new("python3");
         command
@@ -60,12 +82,6 @@ impl WhisperPreview {
         Ok(Self { child, stdin })
     }
 
-    pub fn write_pcm(&mut self, pcm: &[u8]) -> Result<()> {
-        self.stdin
-            .write_all(pcm)
-            .context("failed to send audio to Whisper preview")
-    }
-
     pub fn finish(mut self) -> Result<()> {
         drop(self.stdin);
         let status = self
@@ -78,5 +94,21 @@ impl WhisperPreview {
         }
 
         Ok(())
+    }
+}
+
+fn whisper_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/whisper_live.py")
+}
+
+fn whisper_cli() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/whisper.cpp/build/bin/whisper-cli")
+}
+
+impl PcmSink for WhisperPreview {
+    fn write_pcm(&mut self, pcm: &[u8]) -> Result<()> {
+        self.stdin
+            .write_all(pcm)
+            .context("failed to send audio to Whisper preview")
     }
 }

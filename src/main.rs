@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
-use clap::{Parser, Subcommand};
+use anyhow::{Result, bail};
+use clap::{Parser, Subcommand, value_parser};
 
 mod apps;
 mod audio;
@@ -33,15 +33,15 @@ enum CommandKind {
         output: Option<PathBuf>,
 
         /// Stop after this many seconds. Omit to record until interrupted.
-        #[arg(short, long)]
+        #[arg(short, long, value_parser = value_parser!(u64).range(1..))]
         seconds: Option<u64>,
 
         /// Sample rate passed to pw-cat.
-        #[arg(long, default_value_t = 16_000)]
+        #[arg(long, default_value_t = 16_000, value_parser = value_parser!(u32).range(1..))]
         rate: u32,
 
         /// Channel count passed to pw-cat.
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 1, value_parser = value_parser!(u8).range(1..))]
         channels: u8,
 
         /// Seconds to wait for the selected app to create a PipeWire playback stream.
@@ -53,7 +53,7 @@ enum CommandKind {
         whisper_model: Option<PathBuf>,
 
         /// Seconds per whisper.cpp preview chunk.
-        #[arg(long, default_value_t = 5)]
+        #[arg(long, default_value_t = 5, value_parser = value_parser!(u32).range(1..))]
         whisper_chunk_seconds: u32,
 
         /// Print capture setup and completion diagnostics to stderr.
@@ -128,6 +128,13 @@ fn main() -> Result<()> {
             progress,
             label_transcript,
         } => {
+            if whisper_model.is_some() && channels != 1 {
+                bail!("Whisper preview currently supports mono capture only; use --channels 1");
+            }
+            if let Some(model) = &whisper_model {
+                live::whisper::WhisperPreview::validate_dependencies(model)?;
+            }
+
             let window = apps::find_open_window(&app)?;
             let selector = window.pipewire_selector();
             let stream = pipewire::wait_for_audio_stream(&selector, wait)?;
