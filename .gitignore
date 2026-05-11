@@ -3,3 +3,4 @@
 /tools
 __pycache__/
 *.py[cod]
+meeting.wav
