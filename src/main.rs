@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, value_parser};
 
+mod ai;
 mod apps;
 mod audio;
 mod live;
@@ -22,6 +23,11 @@ enum CommandKind {
     ListApps,
     /// List active PipeWire audio streams that can be captured right now.
     ListStreams,
+    /// Authenticate and use Codex-powered AI features.
+    Ai {
+        #[command(subcommand)]
+        command: ai::Command,
+    },
     /// Capture audio from a PipeWire stream owned by a matching app.
     Capture {
         /// Case-insensitive substring matched against open window title, app id, PID, or process.
@@ -115,6 +121,7 @@ fn main() -> Result<()> {
                 );
             }
         }
+        CommandKind::Ai { command } => ai::run(command)?,
         CommandKind::Capture {
             app,
             output,
