@@ -28,9 +28,9 @@ enum CommandKind {
         #[arg(short, long)]
         app: String,
 
-        /// WAV file to write for the full recording.
+        /// Optional WAV file to write for the full recording.
         #[arg(short, long)]
-        output: PathBuf,
+        output: Option<PathBuf>,
 
         /// Stop after this many seconds. Omit to record until interrupted.
         #[arg(short, long)]
@@ -129,19 +129,20 @@ fn main() -> Result<()> {
             label_transcript,
         } => {
             let window = apps::find_open_window(&app)?;
-            let stream = pipewire::wait_for_audio_stream(&window.pipewire_selector(), wait)?;
+            let selector = window.pipewire_selector();
+            let stream = pipewire::wait_for_audio_stream(&selector, wait)?;
             if verbose {
                 eprintln!(
-                    "Capturing '{}' from PipeWire node {} serial {} into {}",
+                    "Capturing '{}' from PipeWire node {} serial {}",
                     stream.display_name(),
                     stream.id,
-                    stream.serial,
-                    output.display()
+                    stream.serial
                 );
             }
 
             session::run_capture_session(session::CaptureSession {
                 stream,
+                input_selector: selector,
                 output,
                 seconds,
                 rate,

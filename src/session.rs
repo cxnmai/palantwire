@@ -1,6 +1,10 @@
 use std::{
+    collections::VecDeque,
     io::{BufReader, Read},
     path::PathBuf,
+    process::Child,
+    sync::mpsc::{self, Receiver},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -9,12 +13,13 @@ use anyhow::{Context, Result, bail};
 use crate::{
     audio::recording::WavWriter,
     live::whisper::WhisperPreview,
-    pipewire::{self, AudioStream},
+    pipewire::{self, AudioStream, StreamSelector},
 };
 
 pub struct CaptureSession {
     pub stream: AudioStream,
-    pub output: PathBuf,
+    pub input_selector: StreamSelector,
+    pub output: Option<PathBuf>,
     pub seconds: Option<u64>,
     pub rate: u32,
     pub channels: u8,
@@ -39,17 +44,29 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
         rate: session.rate,
         channels: session.channels,
     })?;
-
-    let stdout = capture
+    let output_stdout = capture
         .stdout
         .take()
         .context("failed to read pw-cat audio stream")?;
-    let mut audio = BufReader::new(stdout);
-    let mut recorder =
-        WavWriter::create(&session.output, session.rate, u16::from(session.channels))?;
+    let output_rx = spawn_audio_reader(output_stdout);
+    let mut mic_capture = None;
+    let mut mic_rx = None;
+    let mut mic_buffer = VecDeque::new();
+    let mut app_accepting_input = false;
+    let mut last_input_check = Instant::now() - Duration::from_secs(1);
+
+    let mut recorder = session
+        .output
+        .as_deref()
+        .map(|output| WavWriter::create(output, session.rate, u16::from(session.channels)))
+        .transpose()?;
 
     if session.verbose {
-        eprintln!("Writing full WAV recording to {}", session.output.display());
+        if let Some(output) = &session.output {
+            eprintln!("Writing full WAV recording to {}", output.display());
+        } else {
+            eprintln!("WAV recording disabled");
+        }
     }
 
     let mut whisper_preview = session
@@ -75,24 +92,40 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
         eprintln!("Live preview disabled; pass --whisper-model to enable it");
     }
 
-    let mut buffer = vec![0u8; 4096];
     let mut total_bytes = 0u64;
     let mut last_progress = Instant::now();
 
-    loop {
-        let read = audio
-            .read(&mut buffer)
-            .context("failed to read raw PipeWire audio")?;
-        if read == 0 {
-            break;
+    while let Ok(mut chunk) = output_rx.recv() {
+        if last_input_check.elapsed() >= Duration::from_millis(500) {
+            app_accepting_input =
+                pipewire::input_stream_active(&session.input_selector).unwrap_or(false);
+            last_input_check = Instant::now();
+
+            if app_accepting_input && mic_capture.is_none() {
+                let (child, rx) = spawn_mic_capture(session.rate, session.channels)?;
+                mic_capture = Some(child);
+                mic_rx = Some(rx);
+            } else if !app_accepting_input {
+                stop_child(&mut mic_capture);
+                mic_rx = None;
+                mic_buffer.clear();
+            }
         }
 
-        let chunk = &buffer[..read];
-        total_bytes += read as u64;
-        recorder.write_pcm(chunk)?;
+        if app_accepting_input {
+            if let Some(rx) = &mic_rx {
+                drain_mic_chunks(rx, &mut mic_buffer);
+            }
+            mix_mic_into_output(&mut chunk, &mut mic_buffer);
+        }
+
+        total_bytes += chunk.len() as u64;
+        if let Some(recorder) = &mut recorder {
+            recorder.write_pcm(&chunk)?;
+        }
 
         if let Some(whisper_preview) = &mut whisper_preview {
-            whisper_preview.write_pcm(chunk)?;
+            whisper_preview.write_pcm(&chunk)?;
         }
 
         if session.progress && last_progress.elapsed() >= Duration::from_secs(2) {
@@ -104,15 +137,21 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
     }
 
     let status = capture.wait().context("failed to wait for pw-cat")?;
+    stop_child(&mut mic_capture);
+
     if !status.success() && total_bytes == 0 {
         bail!("pw-cat exited with status {status}");
     } else if session.verbose && !status.success() {
         eprintln!("pw-cat exited with status {status} after audio capture completed");
     }
 
-    recorder.finalize(session.rate, u16::from(session.channels))?;
-    if session.verbose {
-        eprintln!("Saved {}", session.output.display());
+    if let Some(recorder) = recorder {
+        recorder.finalize(session.rate, u16::from(session.channels))?;
+        if session.verbose
+            && let Some(output) = &session.output
+        {
+            eprintln!("Saved {}", output.display());
+        }
     }
 
     if let Some(whisper_preview) = whisper_preview {
@@ -120,4 +159,66 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn spawn_mic_capture(rate: u32, channels: u8) -> Result<(Child, Receiver<Vec<u8>>)> {
+    let mut child = pipewire::spawn_default_raw_capture(rate, channels)?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to read microphone audio stream")?;
+    Ok((child, spawn_audio_reader(stdout)))
+}
+
+fn stop_child(child: &mut Option<Child>) {
+    if let Some(mut child) = child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+fn spawn_audio_reader<R>(reader: R) -> Receiver<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut buffer = vec![0u8; 4096];
+
+        loop {
+            let Ok(read) = reader.read(&mut buffer) else {
+                break;
+            };
+            if read == 0 {
+                break;
+            }
+            if tx.send(buffer[..read].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+
+    rx
+}
+
+fn drain_mic_chunks(rx: &Receiver<Vec<u8>>, buffer: &mut VecDeque<u8>) {
+    while let Ok(chunk) = rx.try_recv() {
+        buffer.extend(chunk);
+    }
+}
+
+fn mix_mic_into_output(output: &mut [u8], mic: &mut VecDeque<u8>) {
+    let pairs = output.len().min(mic.len()) / 2;
+
+    for sample_index in 0..pairs {
+        let byte_index = sample_index * 2;
+        let app_sample = i16::from_le_bytes([output[byte_index], output[byte_index + 1]]);
+        let mic_low = mic.pop_front().unwrap_or_default();
+        let mic_high = mic.pop_front().unwrap_or_default();
+        let mic_sample = i16::from_le_bytes([mic_low, mic_high]);
+        let mixed = app_sample.saturating_add(mic_sample);
+        output[byte_index..byte_index + 2].copy_from_slice(&mixed.to_le_bytes());
+    }
 }

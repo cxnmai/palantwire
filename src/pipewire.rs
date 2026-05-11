@@ -44,7 +44,7 @@ impl AudioStream {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StreamSelector {
     pub process_id: Option<u32>,
     pub match_terms: Vec<String>,
@@ -117,6 +117,10 @@ pub fn wait_for_audio_stream(
     }
 }
 
+pub fn input_stream_active(selector: &StreamSelector) -> Result<bool> {
+    Ok(!matching_streams(selector, "Stream/Input/Audio")?.is_empty())
+}
+
 fn find_audio_stream(selector: &StreamSelector) -> Result<AudioStream> {
     let streams = list_audio_streams()?;
 
@@ -155,6 +159,27 @@ fn find_audio_stream(selector: &StreamSelector) -> Result<AudioStream> {
             ))
         }
     }
+}
+
+fn matching_streams(selector: &StreamSelector, media_class: &str) -> Result<Vec<AudioStream>> {
+    let streams = list_streams_by_media_class(media_class)?;
+
+    if let Some(process_id) = selector.process_id {
+        let pid_matches = streams
+            .iter()
+            .filter(|stream| stream.process_id == Some(process_id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if !pid_matches.is_empty() {
+            return Ok(pid_matches);
+        }
+    }
+
+    Ok(streams
+        .into_iter()
+        .filter(|stream| selector.match_terms.iter().any(|term| stream.matches(term)))
+        .collect())
 }
 
 fn single_stream_match(
@@ -208,16 +233,67 @@ pub fn spawn_raw_capture(options: RawCaptureOptions) -> Result<Child> {
         .context("failed to run pw-cat; install PipeWire utilities")
 }
 
+pub fn spawn_default_raw_capture(rate: u32, channels: u8) -> Result<Child> {
+    let args = vec![
+        OsString::from("--record"),
+        OsString::from("--rate"),
+        OsString::from(rate.to_string()),
+        OsString::from("--channels"),
+        OsString::from(channels.to_string()),
+        OsString::from("--format"),
+        OsString::from("s16"),
+        OsString::from("--raw"),
+        OsString::from("-"),
+    ];
+
+    Command::new("pw-cat")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("failed to run pw-cat for default microphone capture")
+}
+
+fn list_streams_by_media_class(media_class: &str) -> Result<Vec<AudioStream>> {
+    let output = Command::new("pw-dump")
+        .output()
+        .context("failed to run pw-dump; is PipeWire installed and running?")?;
+
+    if !output.status.success() {
+        bail!(
+            "pw-dump failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let objects: Vec<PwObject> =
+        serde_json::from_slice(&output.stdout).context("failed to parse pw-dump JSON")?;
+    let client_process_ids = client_process_ids(&objects);
+
+    Ok(objects
+        .into_iter()
+        .filter_map(|object| stream_from_object(object, &client_process_ids, media_class))
+        .collect())
+}
+
 fn audio_stream_from_object(
     object: PwObject,
     client_process_ids: &HashMap<u32, u32>,
+) -> Option<AudioStream> {
+    stream_from_object(object, client_process_ids, "Stream/Output/Audio")
+}
+
+fn stream_from_object(
+    object: PwObject,
+    client_process_ids: &HashMap<u32, u32>,
+    media_class: &str,
 ) -> Option<AudioStream> {
     if !object.object_type.ends_with(":Node") {
         return None;
     }
 
     let props = object.info?.props?.values;
-    if prop(&props, "media.class") != Some("Stream/Output/Audio") {
+    if prop(&props, "media.class") != Some(media_class) {
         return None;
     }
 
