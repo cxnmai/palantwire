@@ -20,10 +20,16 @@ pub struct WhisperPreview {
     pending: Vec<u8>,
     chunk_index: u64,
     previous_ended_sentence: Option<bool>,
+    transcript_sink: Option<Box<dyn TranscriptSink>>,
 }
 
 pub trait PcmSink {
     fn write_pcm(&mut self, pcm: &[u8]) -> Result<()>;
+}
+
+pub trait TranscriptSink {
+    fn accept_transcript(&mut self, text: &str) -> Result<()>;
+    fn finish(self: Box<Self>) -> Result<()>;
 }
 
 impl WhisperPreview {
@@ -61,7 +67,12 @@ impl WhisperPreview {
             pending: Vec::with_capacity(chunk_bytes),
             chunk_index: 0,
             previous_ended_sentence: None,
+            transcript_sink: None,
         })
+    }
+
+    pub fn set_transcript_sink(&mut self, transcript_sink: Box<dyn TranscriptSink>) {
+        self.transcript_sink = Some(transcript_sink);
     }
 
     pub fn finish(mut self) -> Result<()> {
@@ -71,6 +82,10 @@ impl WhisperPreview {
 
         if self.previous_ended_sentence.is_some() && !self.label_transcript {
             println!();
+        }
+
+        if let Some(transcript_sink) = self.transcript_sink.take() {
+            transcript_sink.finish()?;
         }
 
         Ok(())
@@ -117,7 +132,11 @@ impl WhisperPreview {
         if output.status.success() {
             let text = clean_output(&String::from_utf8_lossy(&output.stdout));
             if !text.is_empty() {
-                self.emit_transcript(&text)?;
+                if let Some(transcript_sink) = &mut self.transcript_sink {
+                    transcript_sink.accept_transcript(&text)?;
+                } else {
+                    self.emit_transcript(&text)?;
+                }
             }
         }
 

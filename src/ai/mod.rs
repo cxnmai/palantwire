@@ -19,6 +19,7 @@ const REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh"];
 
 pub struct SummaryRequest<'a> {
     pub transcript: &'a str,
+    pub prior_summary: Option<&'a str>,
     pub instruction: Option<&'a str>,
     pub model: Option<&'a str>,
     pub reasoning: Option<&'a str>,
@@ -146,6 +147,7 @@ pub fn run(args: Args) -> Result<()> {
             let settings = load_settings()?.unwrap_or_default();
             let summary = provider.summarize(SummaryRequest {
                 transcript: &transcript,
+                prior_summary: None,
                 instruction: instruction.as_deref(),
                 model: model.as_deref().or(settings.model.as_deref()),
                 reasoning: reasoning.as_deref().or(settings.reasoning.as_deref()),

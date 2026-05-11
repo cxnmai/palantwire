@@ -74,7 +74,11 @@ fn auth_status() -> Result<String> {
 }
 
 fn summarize(request: SummaryRequest<'_>) -> Result<String> {
-    let prompt = summary_prompt(request.transcript, request.instruction);
+    let prompt = summary_prompt_with_prior(
+        request.transcript,
+        request.prior_summary,
+        request.instruction,
+    );
     let mut command = Command::new("codex");
     command.args([
         "exec",
@@ -113,20 +117,33 @@ fn summarize(request: SummaryRequest<'_>) -> Result<String> {
     Ok(stdout)
 }
 
-fn summary_prompt(transcript: &str, instruction: Option<&str>) -> String {
+fn summary_prompt_with_prior(
+    transcript: &str,
+    prior_summary: Option<&str>,
+    instruction: Option<&str>,
+) -> String {
     let instruction = instruction.unwrap_or(
-        "Create a concise, useful summary with key points, decisions, and action items when present.",
+        "Maintain a concise, useful markdown summary with key points, decisions, and action items when present.",
     );
+    let prior_summary = prior_summary
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or("(none yet)");
 
     format!(
         "\
-You are summarizing a transcript captured by palantwire.
+You are maintaining a live markdown summary for a transcript captured by palantwire.
 
 Instruction:
 {instruction}
 
-Transcript:
+Prior summary:
+{prior_summary}
+
+New transcript segment:
 {transcript}
+
+Update the prior summary using the new transcript segment. Preserve continuity across arbitrary transcript boundaries. Do not invent details. Return the complete updated markdown summary only.
 "
     )
 }

@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     audio::recording::WavWriter,
+    live::summary::{TranscriptOptions, TranscriptSinkBuilder},
     live::whisper::{PcmSink, WhisperPreview},
     pipewire::{self, AudioStream, StreamSelector},
 };
@@ -23,6 +24,7 @@ pub struct CaptureSession {
     pub rate: u32,
     pub channels: u8,
     pub whisper_model: Option<PathBuf>,
+    pub transcript_options: Option<TranscriptOptions>,
     pub whisper_chunk_seconds: u32,
     pub verbose: bool,
     pub progress: bool,
@@ -32,6 +34,9 @@ pub struct CaptureSession {
 pub fn run_capture_session(session: CaptureSession) -> Result<()> {
     if session.whisper_model.is_some() && session.channels != 1 {
         bail!("Whisper preview currently supports mono capture only; use --channels 1");
+    }
+    if session.transcript_options.is_some() && session.whisper_model.is_none() {
+        bail!("transcript output requires --whisper-model so transcript text can be generated");
     }
 
     let whisper_chunk_bytes = session
@@ -63,6 +68,12 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
             )
         })
         .transpose()?;
+    if let (Some(whisper_preview), Some(transcript_options)) =
+        (&mut whisper_preview, session.transcript_options.clone())
+    {
+        whisper_preview
+            .set_transcript_sink(TranscriptSinkBuilder::new(transcript_options).build()?);
+    }
 
     if session.verbose {
         eprintln!(

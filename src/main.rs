@@ -58,6 +58,30 @@ enum CommandKind {
         #[arg(long)]
         whisper_model: Option<PathBuf>,
 
+        /// Markdown file where live AI summaries are saved.
+        #[arg(long)]
+        summary_output: Option<PathBuf>,
+
+        /// Optional file where raw transcript text is saved.
+        #[arg(long)]
+        raw_transcript_output: Option<PathBuf>,
+
+        /// Extra instruction for live AI summaries.
+        #[arg(long)]
+        summary_instruction: Option<String>,
+
+        /// AI model to use for live summaries.
+        #[arg(long)]
+        summary_model: Option<String>,
+
+        /// AI reasoning level to use for live summaries.
+        #[arg(long)]
+        summary_reasoning: Option<String>,
+
+        /// Disable terminal rendering of raw transcript and markdown summaries.
+        #[arg(long)]
+        no_summary_terminal: bool,
+
         /// Seconds per whisper.cpp preview chunk.
         #[arg(long, default_value_t = 5, value_parser = value_parser!(u32).range(1..))]
         whisper_chunk_seconds: u32,
@@ -130,6 +154,12 @@ fn main() -> Result<()> {
             channels,
             wait,
             whisper_model,
+            summary_output,
+            raw_transcript_output,
+            summary_instruction,
+            summary_model,
+            summary_reasoning,
+            no_summary_terminal,
             whisper_chunk_seconds,
             verbose,
             progress,
@@ -137,6 +167,13 @@ fn main() -> Result<()> {
         } => {
             if whisper_model.is_some() && channels != 1 {
                 bail!("Whisper preview currently supports mono capture only; use --channels 1");
+            }
+            if (summary_output.is_some() || raw_transcript_output.is_some())
+                && whisper_model.is_none()
+            {
+                bail!(
+                    "transcript output and live summaries require --whisper-model so transcript text can be generated"
+                );
             }
             if let Some(model) = &whisper_model {
                 live::whisper::WhisperPreview::validate_dependencies(model)?;
@@ -162,6 +199,15 @@ fn main() -> Result<()> {
                 rate,
                 channels,
                 whisper_model,
+                transcript_options: (summary_output.is_some() || raw_transcript_output.is_some())
+                    .then_some(live::summary::TranscriptOptions {
+                        summary_path: summary_output,
+                        raw_transcript_path: raw_transcript_output,
+                        instruction: summary_instruction,
+                        model: summary_model,
+                        reasoning: summary_reasoning,
+                        render_terminal: !no_summary_terminal,
+                    }),
                 whisper_chunk_seconds,
                 verbose,
                 progress,
