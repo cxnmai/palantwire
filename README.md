@@ -6,3 +6,5 @@ Requires an installed whisper model. You do that yourself, and point palantwire 
 cargo install --git https://github.com/cxnmai/palantwire
 
 currently the window selection only works for niri, since wayland itself doesn't expose window selection. encourage PRs to add support for more LLM providers and wayland compositors. or if you can figure out a general solution.
+
+could use way better prompt engineering as well.
