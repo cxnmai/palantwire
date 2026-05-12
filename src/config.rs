@@ -4,41 +4,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::Subcommand;
 
 #[derive(Debug, Default)]
 pub struct AppConfig {
     pub whisper_model: Option<PathBuf>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum WhisperCommand {
-    /// Save the Whisper model path used by future capture commands.
-    SetModel {
-        /// Path to a whisper.cpp ggml model file.
-        path: PathBuf,
-    },
-    /// Show the saved Whisper model path.
-    Status,
-}
-
-pub fn run_whisper_command(command: WhisperCommand) -> Result<()> {
-    match command {
-        WhisperCommand::SetModel { path } => {
-            set_whisper_model(&path)?;
-            println!("Saved Whisper model: {}", path.display());
-        }
-        WhisperCommand::Status => {
-            let config = load()?;
-            if let Some(path) = config.whisper_model {
-                println!("Whisper model: {}", path.display());
-            } else {
-                println!("Whisper model: not set");
-            }
-        }
-    }
-
-    Ok(())
+    pub output_dir: Option<PathBuf>,
 }
 
 pub fn load() -> Result<AppConfig> {
@@ -62,19 +32,29 @@ pub fn load() -> Result<AppConfig> {
 
         if key.trim() == "whisper_model" {
             config.whisper_model = Some(PathBuf::from(value));
+        } else if key.trim() == "output_dir" {
+            config.output_dir = Some(PathBuf::from(value));
         }
     }
 
     Ok(config)
 }
 
-fn set_whisper_model(path: &Path) -> Result<()> {
+pub fn set_whisper_model(path: &Path) -> Result<()> {
     if !path.exists() {
         bail!("Whisper model does not exist: {}", path.display());
     }
 
     let mut config = load()?;
     config.whisper_model = Some(path.to_owned());
+    save(&config)
+}
+
+pub fn set_output_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))?;
+
+    let mut config = load()?;
+    config.output_dir = Some(path.to_owned());
     save(&config)
 }
 
@@ -89,6 +69,11 @@ fn save(config: &AppConfig) -> Result<()> {
     if let Some(whisper_model) = &config.whisper_model {
         contents.push_str("whisper_model=");
         contents.push_str(&whisper_model.display().to_string());
+        contents.push('\n');
+    }
+    if let Some(output_dir) = &config.output_dir {
+        contents.push_str("output_dir=");
+        contents.push_str(&output_dir.display().to_string());
         contents.push('\n');
     }
 

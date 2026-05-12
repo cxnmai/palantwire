@@ -557,10 +557,6 @@ mod tests {
             Ok(())
         }
 
-        fn auth_status(&self) -> Result<String> {
-            Ok("ok".to_owned())
-        }
-
         fn ensure_authenticated(&self) -> Result<()> {
             Ok(())
         }

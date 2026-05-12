@@ -1,6 +1,6 @@
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
 use super::{LanguageModelProvider, SummaryRequest};
 
@@ -23,17 +23,13 @@ impl LanguageModelProvider for CodexProvider {
         self.ensure_authenticated()
     }
 
-    fn auth_status(&self) -> Result<String> {
-        auth_status()
-    }
-
     fn ensure_authenticated(&self) -> Result<()> {
         let status = auth_status()?;
         if status.contains("Logged in using ChatGPT") {
             return Ok(());
         }
 
-        bail!("Codex is not logged in with ChatGPT. Run `palantwire ai auth` first.")
+        bail!("Codex is not logged in with ChatGPT. Run `palantwire codex auth` first.")
     }
 
     fn summarize(&self, request: SummaryRequest<'_>) -> Result<String> {
@@ -67,9 +63,9 @@ fn auth_status() -> Result<String> {
             Ok(status)
         }
     } else if stderr.is_empty() {
-        Err(anyhow!("Codex login status failed with {}", output.status))
+        bail!("Codex login status failed with {}", output.status)
     } else {
-        Err(anyhow!("Codex login status failed: {stderr}"))
+        bail!("Codex login status failed: {stderr}")
     }
 }
 
