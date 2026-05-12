@@ -46,7 +46,6 @@ pub struct LiveSummarizer {
 #[derive(Debug, Default)]
 struct SummaryState {
     markdown: String,
-    last_segment_id: u64,
 }
 
 #[derive(Debug)]
@@ -113,13 +112,13 @@ impl LiveSummarizer {
         provider.ensure_authenticated()?;
 
         let store = SummaryStore::new(Some(summary_path), options.raw_transcript_path)?;
-        store.write_summary("")?;
+        let markdown = store.load_summary()?;
 
         Ok(Self {
             provider,
             segmenter: TranscriptSegmenter::new(SegmenterConfig::default()),
             store,
-            state: SummaryState::default(),
+            state: SummaryState { markdown },
             terminal: TerminalRenderer::new(options.render_terminal),
             instruction: options.instruction,
             model: options.model,
@@ -147,31 +146,36 @@ impl LiveSummarizer {
 
     fn summarize_segment(&mut self, segment: SummarySegment) -> Result<()> {
         let instruction = self.summary_instruction();
+        let transcript = format_transcript_text(&segment.raw_text);
         let summary = self.provider.summarize(SummaryRequest {
-            transcript: &segment.raw_text,
+            transcript: &transcript,
             prior_summary: Some(&self.state.markdown),
             instruction: Some(&instruction),
             model: self.model.as_deref(),
             reasoning: self.reasoning.as_deref(),
         })?;
 
-        self.state.markdown = summary;
-        self.state.last_segment_id = segment.id;
-        self.store.write_summary(&self.state.markdown)?;
-        self.terminal.render_summary(&self.state.markdown)?;
+        let summary = summary_update_only(&self.state.markdown, &summary);
+        if summary.is_empty() {
+            return Ok(());
+        }
+
+        self.store.append_summary(&summary)?;
+        self.state.markdown = self.store.load_summary()?;
+        self.terminal.render_summary_update(&summary)?;
         Ok(())
     }
 
     fn summary_instruction(&self) -> String {
         let user_instruction = self.instruction.as_deref().unwrap_or(
-            "Maintain a concise live markdown summary with key points, decisions, and action items.",
+            "Maintain a chronological, easy-to-scan live markdown summary. Write straight down in order, organized with useful section headings as topics shift. Use prose, short paragraphs, emphasis, inline code, and occasional bullets only when they genuinely improve readability. Avoid a rigid template like key points, decisions, and action items.",
         );
 
         format!(
             "\
 {user_instruction}
 
-Update the prior summary using the new transcript segment. Preserve continuity across arbitrary transcript boundaries. Do not invent details. Return the complete updated markdown summary only."
+Update the prior summary using the new transcript segment. Preserve continuity across arbitrary transcript boundaries. Do not invent details. Keep the summary chronological and organized with meaningful section headings. Return only the new markdown update to append to the existing summary. Do not repeat prior content."
         )
     }
 }
@@ -238,13 +242,48 @@ impl SummaryStore {
         })
     }
 
-    fn write_summary(&self, markdown: &str) -> Result<()> {
+    fn load_summary(&self) -> Result<String> {
         let Some(summary_path) = &self.summary_path else {
+            return Ok(String::new());
+        };
+
+        if !summary_path.exists() {
+            return Ok(String::new());
+        }
+
+        fs::read_to_string(summary_path)
+            .with_context(|| format!("failed to read {}", summary_path.display()))
+    }
+
+    fn append_summary(&self, markdown: &str) -> Result<()> {
+        let Some(path) = &self.summary_path else {
             return Ok(());
         };
 
-        fs::write(summary_path, markdown)
-            .with_context(|| format!("failed to write {}", summary_path.display()))
+        let markdown = markdown.trim();
+        if markdown.is_empty() {
+            return Ok(());
+        }
+
+        let needs_separator = path.exists()
+            && fs::metadata(path)
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .len()
+                > 0;
+
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+
+        if needs_separator {
+            file.write_all(b"\n\n")
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+
+        file.write_all(markdown.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))
     }
 
     fn append_raw(&self, text: &str) -> Result<()> {
@@ -257,6 +296,7 @@ impl SummaryStore {
             .create(true)
             .open(path)
             .with_context(|| format!("failed to open {}", path.display()))?;
+        let text = format_transcript_text(text);
         file.write_all(text.as_bytes())
             .with_context(|| format!("failed to write {}", path.display()))
     }
@@ -279,18 +319,19 @@ impl TerminalRenderer {
             return Ok(());
         }
 
+        let text = format_transcript_text(text);
         print!("\x1b[90m\x1b[3m{text}\x1b[0m");
         std::io::stdout()
             .flush()
             .context("failed to flush raw transcript")
     }
 
-    fn render_summary(&self, markdown: &str) -> Result<()> {
+    fn render_summary_update(&self, update: &str) -> Result<()> {
         if !self.render_terminal {
             return Ok(());
         }
 
-        let rendered = render(markdown, &self.markdown_options);
+        let rendered = render(update, &self.markdown_options);
         println!("\n{rendered}");
         Ok(())
     }
@@ -380,7 +421,7 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 }
 
 fn append_normalized(buffer: &mut String, text: &str) {
-    let text = normalize_spaces(text);
+    let text = normalize_for_segment(text);
     if text.is_empty() {
         return;
     }
@@ -391,8 +432,35 @@ fn append_normalized(buffer: &mut String, text: &str) {
     buffer.push_str(&text);
 }
 
-fn normalize_spaces(text: &str) -> String {
+fn normalize_for_segment(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn format_transcript_text(text: &str) -> String {
+    let normalized = normalize_for_segment(text);
+    if normalized.is_empty() {
+        return normalized;
+    }
+
+    let mut output = String::with_capacity(normalized.len() + 2);
+    let mut chars = normalized.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        output.push(ch);
+        if matches!(ch, '.' | '!' | '?') {
+            while matches!(chars.peek(), Some(next) if next.is_whitespace()) {
+                chars.next();
+            }
+            if chars.peek().is_some() {
+                output.push('\n');
+            }
+        } else if ch == ',' && matches!(chars.peek(), Some(next) if !next.is_whitespace()) {
+            output.push(' ');
+        }
+    }
+
+    output.push('\n');
+    output
 }
 
 fn stable_prefix(text: &str) -> (&str, &str) {
@@ -433,6 +501,48 @@ fn trim_carryover(text: &str, max_chars: usize) -> &str {
 
 fn non_whitespace_chars(text: &str) -> usize {
     text.chars().filter(|ch| !ch.is_whitespace()).count()
+}
+
+fn summary_update_only(prior_summary: &str, model_output: &str) -> String {
+    let output = model_output.trim();
+    if output.is_empty() || output == "<!-- no update -->" {
+        return String::new();
+    }
+
+    let prior = prior_summary.trim();
+    if prior.is_empty() {
+        return output.to_owned();
+    }
+
+    if let Some(update) = output.strip_prefix(prior) {
+        return trim_summary_separator(update);
+    }
+
+    strip_common_line_prefix(prior, output)
+}
+
+fn trim_summary_separator(text: &str) -> String {
+    text.trim_start_matches(|ch: char| ch.is_whitespace())
+        .to_owned()
+}
+
+fn strip_common_line_prefix(prior_summary: &str, model_output: &str) -> String {
+    let prior_lines: Vec<&str> = prior_summary.lines().collect();
+    let output_lines: Vec<&str> = model_output.lines().collect();
+    let mut shared_lines = 0;
+
+    while shared_lines < prior_lines.len()
+        && shared_lines < output_lines.len()
+        && prior_lines[shared_lines].trim_end() == output_lines[shared_lines].trim_end()
+    {
+        shared_lines += 1;
+    }
+
+    if shared_lines == 0 {
+        return model_output.trim().to_owned();
+    }
+
+    output_lines[shared_lines..].join("\n").trim().to_owned()
 }
 
 #[cfg(test)]
@@ -546,9 +656,59 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(raw_path).unwrap(),
-            "The first stable point is done."
+            "The first stable point is done.\n"
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn summary_store_appends_updates_with_spacing() {
+        let dir =
+            std::env::temp_dir().join(format!("palantwire-summary-append-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let summary_path = dir.join("summary.md");
+
+        let store = SummaryStore::new(Some(summary_path.clone()), None).unwrap();
+        store.append_summary("# First update").unwrap();
+        store.append_summary("## Second update").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(summary_path).unwrap(),
+            "# First update\n\n## Second update"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn transcript_format_puts_sentences_on_new_lines() {
+        assert_eq!(
+            format_transcript_text("First sentence. Second sentence!Third? final"),
+            "First sentence.\nSecond sentence!\nThird?\nfinal\n"
+        );
+    }
+
+    #[test]
+    fn summary_update_only_strips_full_summary_response() {
+        let prior = "# Existing\n\nThe old summary.";
+        let full_response = "# Existing\n\nThe old summary.\n\n## New\n\nFresh detail.";
+
+        assert_eq!(
+            summary_update_only(prior, full_response),
+            "## New\n\nFresh detail."
+        );
+    }
+
+    #[test]
+    fn summary_update_only_strips_common_line_prefix() {
+        let prior = "# Existing\n\nThe old summary.";
+        let full_response = "# Existing \n\nThe old summary.\n\n## New\n\nFresh detail.";
+
+        assert_eq!(
+            summary_update_only(prior, full_response),
+            "## New\n\nFresh detail."
+        );
     }
 }

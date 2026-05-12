@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand, value_parser};
 mod ai;
 mod apps;
 mod audio;
+mod config;
 mod live;
 mod pipewire;
 mod session;
@@ -27,6 +28,11 @@ enum CommandKind {
     Ai {
         #[command(flatten)]
         args: ai::Args,
+    },
+    /// Configure Whisper model defaults.
+    Whisper {
+        #[command(subcommand)]
+        command: config::WhisperCommand,
     },
     /// Capture audio from a PipeWire stream owned by a matching app.
     Capture {
@@ -146,6 +152,7 @@ fn main() -> Result<()> {
             }
         }
         CommandKind::Ai { args } => ai::run(args)?,
+        CommandKind::Whisper { command } => config::run_whisper_command(command)?,
         CommandKind::Capture {
             app,
             output,
@@ -165,6 +172,7 @@ fn main() -> Result<()> {
             progress,
             label_transcript,
         } => {
+            let whisper_model = whisper_model.or_else(|| config::load().ok()?.whisper_model);
             if whisper_model.is_some() && channels != 1 {
                 bail!("Whisper preview currently supports mono capture only; use --channels 1");
             }

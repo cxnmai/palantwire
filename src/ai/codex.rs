@@ -123,7 +123,7 @@ fn summary_prompt_with_prior(
     instruction: Option<&str>,
 ) -> String {
     let instruction = instruction.unwrap_or(
-        "Maintain a concise, useful markdown summary with key points, decisions, and action items when present.",
+        "Maintain a chronological, easy-to-scan live markdown summary. Write straight down in order, organized with useful section headings as topics shift. Use prose, short paragraphs, emphasis, inline code, and occasional bullets only when they genuinely improve readability. Avoid a rigid template like key points, decisions, and action items.",
     );
     let prior_summary = prior_summary
         .map(str::trim)
@@ -143,7 +143,21 @@ Prior summary:
 New transcript segment:
 {transcript}
 
-Update the prior summary using the new transcript segment. Preserve continuity across arbitrary transcript boundaries. Do not invent details. Return the complete updated markdown summary only.
+Create only the markdown update that should be appended after the prior summary. Preserve continuity across arbitrary transcript boundaries. Do not invent details.
+
+Output contract:
+- Return only new markdown for the current transcript segment.
+- Do not include, restate, rewrite, or improve any prior summary text.
+- Do not wrap the response in code fences or add commentary.
+- If the new transcript adds no durable information, return exactly: <!-- no update -->
+
+Style requirements for the new markdown update:
+- Keep it chronological and organized with meaningful section headings.
+- Prefer readable prose and short paragraphs over pure bullet lists. Use bullet lists when applicable though.
+- Use markdown structure that renders well in terminal: headings, bold, italics, inline code, blockquotes, and occasional bullets where helpful.
+- Do not force fixed sections like Key Points, Decisions, or Action Items unless the transcript naturally calls for them.
+- Use super condensed language that still sounds natural. No complicated wording, and give ideas in few words.
+- Do NOT answer as if you're telling about a meeting, rather speak generally. So if someone asks a question don't say someone asked a question, talk about the discussion itself that was brought out.
 "
     )
 }

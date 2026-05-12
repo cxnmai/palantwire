@@ -74,14 +74,48 @@ pub fn list_open_windows() -> Result<Vec<OpenWindow>> {
 }
 
 pub fn find_open_window(query: &str) -> Result<OpenWindow> {
-    let matches = list_open_windows()?
+    let windows = list_open_windows()?;
+    let numeric_query = query.parse::<u64>().ok();
+
+    if let Some(numeric_query) = numeric_query {
+        let exact_matches = windows
+            .iter()
+            .filter(|window| {
+                window.id == numeric_query
+                    || window
+                        .pid
+                        .is_some_and(|pid| u64::from(pid) == numeric_query)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if let Some(window) = single_window_match(query, &exact_matches)? {
+            return Ok(window);
+        }
+    }
+
+    let exact_app_matches = windows
+        .iter()
+        .filter(|window| window.app_id.eq_ignore_ascii_case(query))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(window) = single_window_match(query, &exact_app_matches)? {
+        return Ok(window);
+    }
+
+    let matches = windows
         .into_iter()
         .filter(|window| window.matches(query))
         .collect::<Vec<_>>();
 
-    match matches.as_slice() {
-        [] => Err(anyhow!("no open window matched '{query}'")),
-        [window] => Ok(window.clone()),
+    single_window_match(query, &matches)?.ok_or_else(|| anyhow!("no open window matched '{query}'"))
+}
+
+fn single_window_match(query: &str, matches: &[OpenWindow]) -> Result<Option<OpenWindow>> {
+    match matches {
+        [] => Ok(None),
+        [window] => Ok(Some(window.clone())),
         windows => {
             let choices = windows
                 .iter()

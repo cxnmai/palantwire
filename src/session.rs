@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     io::{BufReader, Read},
     path::PathBuf,
     process::Child,
@@ -39,17 +40,6 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
         bail!("transcript output requires --whisper-model so transcript text can be generated");
     }
 
-    let whisper_chunk_bytes = session
-        .whisper_model
-        .is_some()
-        .then(|| {
-            whisper_chunk_bytes(
-                session.rate,
-                session.channels,
-                session.whisper_chunk_seconds,
-            )
-        })
-        .transpose()?;
     let mut recorder = session
         .output
         .as_deref()
@@ -75,6 +65,11 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
             .set_transcript_sink(TranscriptSinkBuilder::new(transcript_options).build()?);
     }
 
+    let has_visible_or_saved_output = session.output.is_some()
+        || session.whisper_model.is_some()
+        || session.progress
+        || session.verbose;
+
     if session.verbose {
         eprintln!(
             "Starting raw PipeWire capture from node {} at {} Hz, {} channel(s)",
@@ -93,6 +88,11 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
         } else {
             eprintln!("Live preview disabled; pass --whisper-model to enable it");
         }
+    } else if !has_visible_or_saved_output {
+        eprintln!(
+            "Capturing audio from '{}'. No output was requested; pass --output, --whisper-model, or --progress to see/save results. Press Ctrl-C to stop.",
+            session.stream.display_name()
+        );
     }
 
     let mut capture = pipewire::spawn_raw_capture(pipewire::RawCaptureOptions {
@@ -108,9 +108,10 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
     let output_rx = spawn_audio_reader(output_stdout);
     let mut mic_capture = None;
     let mut mic_rx = None;
+    let mut mic_buffer = VecDeque::new();
     let mut app_accepting_input = false;
+    let mut previous_app_accepting_input = false;
     let mut last_input_check = Instant::now() - Duration::from_secs(1);
-    let mut mic_pending_bytes = 0usize;
 
     let mut total_bytes = 0u64;
     let mut last_progress = Instant::now();
@@ -121,23 +122,23 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
                 pipewire::input_stream_active(&session.input_selector).unwrap_or(false);
             last_input_check = Instant::now();
 
+            if session.verbose && app_accepting_input != previous_app_accepting_input {
+                if app_accepting_input {
+                    eprintln!("Selected app is accepting input; mic transcription enabled");
+                } else {
+                    eprintln!("Selected app is not accepting input; mic transcription paused");
+                }
+                previous_app_accepting_input = app_accepting_input;
+            }
+
             if app_accepting_input && mic_capture.is_none() && whisper_preview.is_some() {
                 let (child, rx) = spawn_mic_capture(session.rate, session.channels)?;
                 mic_capture = Some(child);
                 mic_rx = Some(rx);
             } else if !app_accepting_input {
-                if let (Some(rx), Some(whisper_preview), Some(chunk_bytes)) =
-                    (&mic_rx, &mut whisper_preview, whisper_chunk_bytes)
-                {
-                    drain_mic_chunks_to_whisper(rx, whisper_preview, &mut mic_pending_bytes)?;
-                    flush_mic_segment_to_whisper(
-                        whisper_preview,
-                        chunk_bytes,
-                        &mut mic_pending_bytes,
-                    )?;
-                }
                 stop_child(&mut mic_capture);
                 mic_rx = None;
+                mic_buffer.clear();
             }
         }
 
@@ -146,10 +147,15 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
             recorder.write_pcm(&chunk)?;
         }
 
-        if app_accepting_input
-            && let (Some(rx), Some(whisper_preview)) = (&mic_rx, &mut whisper_preview)
-        {
-            drain_mic_chunks_to_whisper(rx, whisper_preview, &mut mic_pending_bytes)?;
+        if let Some(whisper_preview) = &mut whisper_preview {
+            let mut transcript_chunk = chunk.clone();
+            if app_accepting_input {
+                if let Some(rx) = &mic_rx {
+                    drain_mic_chunks(rx, &mut mic_buffer);
+                }
+                mix_mic_into_output(&mut transcript_chunk, &mut mic_buffer);
+            }
+            whisper_preview.write_pcm(&transcript_chunk)?;
         }
 
         if session.progress && last_progress.elapsed() >= Duration::from_secs(2) {
@@ -161,12 +167,6 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
     }
 
     let status = capture.wait().context("failed to wait for pw-cat")?;
-    if let (Some(rx), Some(whisper_preview), Some(chunk_bytes)) =
-        (&mic_rx, &mut whisper_preview, whisper_chunk_bytes)
-    {
-        drain_mic_chunks_to_whisper(rx, whisper_preview, &mut mic_pending_bytes)?;
-        flush_mic_segment_to_whisper(whisper_preview, chunk_bytes, &mut mic_pending_bytes)?;
-    }
     stop_child(&mut mic_capture);
 
     if !status.success() && total_bytes == 0 {
@@ -230,88 +230,38 @@ where
     rx
 }
 
-fn drain_mic_chunks_to_whisper(
-    rx: &Receiver<Vec<u8>>,
-    whisper_preview: &mut impl PcmSink,
-    pending_bytes: &mut usize,
-) -> Result<()> {
+fn drain_mic_chunks(rx: &Receiver<Vec<u8>>, buffer: &mut VecDeque<u8>) {
     while let Ok(chunk) = rx.try_recv() {
-        *pending_bytes += chunk.len();
-        whisper_preview.write_pcm(&chunk)?;
+        buffer.extend(chunk);
     }
-    Ok(())
 }
 
-fn whisper_chunk_bytes(rate: u32, channels: u8, chunk_seconds: u32) -> Result<usize> {
-    (rate as usize)
-        .checked_mul(usize::from(channels))
-        .and_then(|bytes| bytes.checked_mul(2))
-        .and_then(|bytes| bytes.checked_mul(chunk_seconds as usize))
-        .filter(|bytes| *bytes > 0)
-        .context("Whisper chunk size is too large")
-}
+fn mix_mic_into_output(output: &mut [u8], mic: &mut VecDeque<u8>) {
+    let pairs = output.len().min(mic.len()) / 2;
 
-fn flush_mic_segment_to_whisper(
-    whisper_preview: &mut impl PcmSink,
-    chunk_bytes: usize,
-    pending_bytes: &mut usize,
-) -> Result<()> {
-    let remainder = *pending_bytes % chunk_bytes;
-    if remainder == 0 {
-        return Ok(());
+    for sample_index in 0..pairs {
+        let byte_index = sample_index * 2;
+        let app_sample = i16::from_le_bytes([output[byte_index], output[byte_index + 1]]);
+        let mic_low = mic.pop_front().unwrap_or_default();
+        let mic_high = mic.pop_front().unwrap_or_default();
+        let mic_sample = i16::from_le_bytes([mic_low, mic_high]);
+        let mixed = app_sample.saturating_add(mic_sample);
+        output[byte_index..byte_index + 2].copy_from_slice(&mixed.to_le_bytes());
     }
-
-    let padding = vec![0; chunk_bytes - remainder];
-    whisper_preview.write_pcm(&padding)?;
-    *pending_bytes = 0;
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[derive(Default)]
-    struct TestSink {
-        writes: Vec<Vec<u8>>,
-    }
-
-    impl PcmSink for TestSink {
-        fn write_pcm(&mut self, pcm: &[u8]) -> Result<()> {
-            self.writes.push(pcm.to_vec());
-            Ok(())
-        }
-    }
-
     #[test]
-    fn whisper_chunk_size_uses_s16le_bytes() {
-        assert_eq!(whisper_chunk_bytes(16_000, 1, 5).unwrap(), 160_000);
-    }
+    fn mix_mic_into_output_saturates_samples() {
+        let mut output = 30_000i16.to_le_bytes().to_vec();
+        let mut mic = VecDeque::from(10_000i16.to_le_bytes().to_vec());
 
-    #[test]
-    fn whisper_chunk_size_rejects_overflow() {
-        assert!(whisper_chunk_bytes(u32::MAX, u8::MAX, u32::MAX).is_err());
-    }
+        mix_mic_into_output(&mut output, &mut mic);
 
-    #[test]
-    fn flush_pads_partial_mic_segment_to_chunk_boundary() {
-        let mut sink = TestSink::default();
-        let mut pending_bytes = 6;
-
-        flush_mic_segment_to_whisper(&mut sink, 10, &mut pending_bytes).unwrap();
-
-        assert_eq!(pending_bytes, 0);
-        assert_eq!(sink.writes, vec![vec![0; 4]]);
-    }
-
-    #[test]
-    fn flush_does_not_pad_aligned_mic_segment() {
-        let mut sink = TestSink::default();
-        let mut pending_bytes = 10;
-
-        flush_mic_segment_to_whisper(&mut sink, 10, &mut pending_bytes).unwrap();
-
-        assert_eq!(pending_bytes, 10);
-        assert!(sink.writes.is_empty());
+        assert_eq!(i16::from_le_bytes([output[0], output[1]]), i16::MAX);
+        assert!(mic.is_empty());
     }
 }
