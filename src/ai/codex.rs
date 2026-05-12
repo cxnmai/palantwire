@@ -158,6 +158,7 @@ Style requirements for the new markdown update:
 - Do not force fixed sections like Key Points, Decisions, or Action Items unless the transcript naturally calls for them.
 - Use super condensed language that still sounds natural. No complicated wording, and give ideas in few words.
 - Do NOT answer as if you're telling about a meeting, rather speak generally. So if someone asks a question don't say someone asked a question, talk about the discussion itself that was brought out.
+- Ignore unimportant information and don't include it. Don't bother to summarize every little detail or conversation - maintain a threshold for importance.
 "
     )
 }

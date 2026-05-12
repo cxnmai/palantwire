@@ -86,11 +86,11 @@ struct SummarySegment {
 impl Default for SegmenterConfig {
     fn default() -> Self {
         Self {
-            target_interval: Duration::from_secs(30),
-            force_interval: Duration::from_secs(60),
-            min_chars: 300,
-            force_min_chars: 80,
-            max_chars: 900,
+            target_interval: Duration::from_millis(52_500),
+            force_interval: Duration::from_secs(105),
+            min_chars: 525,
+            force_min_chars: 140,
+            max_chars: 1575,
             carryover_chars: 160,
         }
     }
