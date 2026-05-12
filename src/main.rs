@@ -165,7 +165,7 @@ fn run_start(save_transcript: bool) -> Result<()> {
     let selector = window.pipewire_selector();
 
     println!(
-        "Waiting for PipeWire audio from '{}'...",
+        "Waiting for PipeWire audio from '{}'. Start playback in that app.",
         window.display_name()
     );
     let stream = wait_for_selected_stream(&selector)?;
@@ -361,10 +361,7 @@ fn wait_for_selected_stream(selector: &pipewire::StreamSelector) -> Result<pipew
     loop {
         match pipewire::wait_for_audio_stream(selector, 1) {
             Ok(stream) => return Ok(stream),
-            Err(error) => {
-                eprintln!("{error}");
-                thread::sleep(Duration::from_secs(1));
-            }
+            Err(_) => thread::sleep(Duration::from_secs(1)),
         }
     }
 }
