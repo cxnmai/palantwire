@@ -33,8 +33,7 @@ pub trait TranscriptSink {
 }
 
 impl WhisperPreview {
-    pub fn validate_dependencies(model: &Path) -> Result<()> {
-        let whisper_cli = whisper_cli();
+    pub fn validate_dependencies(whisper_cli: &Path, model: &Path) -> Result<()> {
         if !whisper_cli.exists() {
             bail!("missing whisper-cli: {}", whisper_cli.display());
         }
@@ -47,18 +46,19 @@ impl WhisperPreview {
     }
 
     pub fn spawn(
+        whisper_cli: &Path,
         model: &Path,
         sample_rate: u32,
         chunk_seconds: u32,
         _verbose: bool,
         label_transcript: bool,
     ) -> Result<Self> {
-        Self::validate_dependencies(model)?;
+        Self::validate_dependencies(whisper_cli, model)?;
         let chunk_bytes = chunk_size(sample_rate, chunk_seconds)?;
         let temp_dir = create_temp_dir()?;
 
         Ok(Self {
-            whisper_cli: whisper_cli(),
+            whisper_cli: whisper_cli.to_owned(),
             model: model.to_owned(),
             sample_rate,
             chunk_bytes,
@@ -191,10 +191,6 @@ impl WavWriterExt for WavWriter {
         self.write_pcm(pcm)?;
         self.finalize(sample_rate, channels)
     }
-}
-
-fn whisper_cli() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/whisper.cpp/build/bin/whisper-cli")
 }
 
 fn chunk_size(sample_rate: u32, chunk_seconds: u32) -> Result<usize> {

@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Default)]
 pub struct AppConfig {
+    pub whisper_cli: Option<PathBuf>,
     pub whisper_model: Option<PathBuf>,
     pub output_dir: Option<PathBuf>,
 }
@@ -30,14 +31,25 @@ pub fn load() -> Result<AppConfig> {
             continue;
         }
 
-        if key.trim() == "whisper_model" {
-            config.whisper_model = Some(PathBuf::from(value));
-        } else if key.trim() == "output_dir" {
-            config.output_dir = Some(PathBuf::from(value));
+        match key.trim() {
+            "whisper_cli" => config.whisper_cli = Some(PathBuf::from(value)),
+            "whisper_model" => config.whisper_model = Some(PathBuf::from(value)),
+            "output_dir" => config.output_dir = Some(PathBuf::from(value)),
+            _ => {}
         }
     }
 
     Ok(config)
+}
+
+pub fn set_whisper_cli(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("whisper-cli does not exist: {}", path.display());
+    }
+
+    let mut config = load()?;
+    config.whisper_cli = Some(path.to_owned());
+    save(&config)
 }
 
 pub fn set_whisper_model(path: &Path) -> Result<()> {
@@ -66,6 +78,11 @@ fn save(config: &AppConfig) -> Result<()> {
     }
 
     let mut contents = String::new();
+    if let Some(whisper_cli) = &config.whisper_cli {
+        contents.push_str("whisper_cli=");
+        contents.push_str(&whisper_cli.display().to_string());
+        contents.push('\n');
+    }
     if let Some(whisper_model) = &config.whisper_model {
         contents.push_str("whisper_model=");
         contents.push_str(&whisper_model.display().to_string());

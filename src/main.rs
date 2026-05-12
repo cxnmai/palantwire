@@ -45,9 +45,9 @@ enum CommandKind {
         #[arg(long)]
         reasoning: Option<String>,
     },
-    /// Configure the whisper.cpp model path.
+    /// Configure the whisper.cpp executable path.
     Whisper {
-        /// Path to a whisper.cpp ggml model file.
+        /// Path to the whisper.cpp whisper-cli executable.
         #[arg(long)]
         path: PathBuf,
     },
@@ -83,8 +83,8 @@ fn main() -> Result<()> {
             reasoning,
         }) => run_codex(command, model, reasoning),
         Some(CommandKind::Whisper { path }) => {
-            config::set_whisper_model(&path)?;
-            println!("Saved Whisper model: {}", path.display());
+            config::set_whisper_cli(&path)?;
+            println!("Saved whisper-cli path: {}", path.display());
             Ok(())
         }
         Some(CommandKind::Output { path }) => {
@@ -143,11 +143,15 @@ fn list_codex_options() {
 
 fn run_start(save_transcript: bool) -> Result<()> {
     let app_config = config::load()?;
+    let whisper_cli = match app_config.whisper_cli {
+        Some(path) => path,
+        None => prompt_for_whisper_cli()?,
+    };
     let whisper_model = match app_config.whisper_model {
         Some(path) => path,
         None => prompt_for_whisper_model()?,
     };
-    live::whisper::WhisperPreview::validate_dependencies(&whisper_model)?;
+    live::whisper::WhisperPreview::validate_dependencies(&whisper_cli, &whisper_model)?;
 
     let output_dir = match app_config.output_dir {
         Some(path) => path,
@@ -174,6 +178,7 @@ fn run_start(save_transcript: bool) -> Result<()> {
         seconds: None,
         rate: 16_000,
         channels: 1,
+        whisper_cli: Some(whisper_cli),
         whisper_model: Some(whisper_model),
         transcript_options: Some(live::summary::TranscriptOptions {
             summary_path: Some(summary_path),
@@ -188,6 +193,20 @@ fn run_start(save_transcript: bool) -> Result<()> {
         progress: false,
         label_transcript: false,
     })
+}
+
+fn prompt_for_whisper_cli() -> Result<PathBuf> {
+    loop {
+        let answer = prompt("whisper-cli path: ")?;
+        let path = PathBuf::from(answer.trim());
+        match config::set_whisper_cli(&path) {
+            Ok(()) => {
+                println!("Saved whisper-cli path: {}", path.display());
+                return Ok(path);
+            }
+            Err(error) => println!("{error}"),
+        }
+    }
 }
 
 fn prompt_for_whisper_model() -> Result<PathBuf> {

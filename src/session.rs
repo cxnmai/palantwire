@@ -24,6 +24,7 @@ pub struct CaptureSession {
     pub seconds: Option<u64>,
     pub rate: u32,
     pub channels: u8,
+    pub whisper_cli: Option<PathBuf>,
     pub whisper_model: Option<PathBuf>,
     pub transcript_options: Option<TranscriptOptions>,
     pub whisper_chunk_seconds: u32,
@@ -39,6 +40,9 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
     if session.transcript_options.is_some() && session.whisper_model.is_none() {
         bail!("transcript output requires --whisper-model so transcript text can be generated");
     }
+    if session.whisper_model.is_some() && session.whisper_cli.is_none() {
+        bail!("Whisper capture requires a configured whisper-cli path");
+    }
 
     let mut recorder = session
         .output
@@ -48,8 +52,10 @@ pub fn run_capture_session(session: CaptureSession) -> Result<()> {
     let mut whisper_preview = session
         .whisper_model
         .as_deref()
-        .map(|model| {
+        .zip(session.whisper_cli.as_deref())
+        .map(|(model, whisper_cli)| {
             WhisperPreview::spawn(
+                whisper_cli,
                 model,
                 session.rate,
                 session.whisper_chunk_seconds,
